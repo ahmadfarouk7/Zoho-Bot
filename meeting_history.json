@@ -1,0 +1,66 @@
+[
+  {
+    "id": "bdeaec88e6f4f168",
+    "subject": "Pet Insurance- Online Meeting",
+    "sender": "Sherif Reda <sreda@beyond-ib.com>",
+    "organizer": "sreda@beyond-ib.com",
+    "start": "2026-06-10T17:00:00+00:00",
+    "end": "2026-06-10T17:30:00+00:00",
+    "location": "https://meet.google.com/tts-drdt-yhz",
+    "link": "",
+    "summary": [
+      "This is an event reminder"
+    ],
+    "reminders_sent": [],
+    "saved_at": "2026-06-11T09:12:30.534982+00:00"
+  },
+  {
+    "id": "ab5e74f54041fddf",
+    "subject": "Pet Insurance- Online Meeting @ Wed Jun 10, 2026 04:30\r\n pm - 05:00 pm (Africa/Cairo)",
+    "sender": "<noreply@zohocalendar.com>",
+    "organizer": "noreply@zohocalendar.com",
+    "start": "2026-06-10T13:15:09+00:00",
+    "end": null,
+    "location": "",
+    "link": "",
+    "summary": [
+      ".zclet__header__info a,",
+      ".zclet__header__title a,",
+      ".zclet__event__text a {"
+    ],
+    "reminders_sent": [],
+    "saved_at": "2026-06-11T09:12:26.907077+00:00"
+  },
+  {
+    "id": "fc0c20b0524ad86e",
+    "subject": "Pet Insurance- Online Meeting @ Wed Jun 10, 2026 05:00\r\n pm - 05:30 pm (Africa/Cairo)",
+    "sender": "<noreply@zohocalendar.com>",
+    "organizer": "noreply@zohocalendar.com",
+    "start": "2026-06-10T13:45:20+00:00",
+    "end": null,
+    "location": "",
+    "link": "",
+    "summary": [
+      ".zclet__header__info a,",
+      ".zclet__header__title a,",
+      ".zclet__event__text a {"
+    ],
+    "reminders_sent": [],
+    "saved_at": "2026-06-11T09:12:27.369498+00:00"
+  },
+  {
+    "id": "693cb0a1cbf2a085",
+    "subject": "Pet Insurance- Online Meeting",
+    "sender": "\"Mohamed ElGebali\" <mohamed.elgebali@beyond-ib.com>",
+    "organizer": "Mohamed ElGebali",
+    "start": "2026-06-10T14:27:07+00:00",
+    "end": null,
+    "location": "https://tinyurl.com/y3cca7ds",
+    "link": "",
+    "summary": [
+      "meet.google.com/tts-drdt-yhz"
+    ],
+    "reminders_sent": [],
+    "saved_at": "2026-06-11T09:12:30.295100+00:00"
+  }
+]
