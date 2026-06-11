@@ -26,10 +26,10 @@ os.makedirs(DATA_DIR, exist_ok=True)
 _CAIRO_TZ = timezone(timedelta(hours=2), "EET")
 
 CONFIG = {
-    "zoho_email":    os.environ.get("ZOHO_EMAIL",    "ahmed.farouk@beyond-solution.com"),
-    "zoho_password": os.environ.get("ZOHO_PASSWORD", "Qpr011Rtgx2Q"),
-    "telegram_bot_token": os.environ.get("TELEGRAM_BOT_TOKEN", "8840532206:AAFckFn4HkN4uq_vwcdEptDcHVPCDPrGQmE"),
-    "telegram_chat_id":   os.environ.get("TELEGRAM_CHAT_ID",   "7858493283"),
+    "zoho_email":    os.environ.get("ZOHO_EMAIL",    "####################"),
+    "zoho_password": os.environ.get("ZOHO_PASSWORD", "####################"),
+    "telegram_bot_token": os.environ.get("TELEGRAM_BOT_TOKEN", "####################"),
+    "telegram_chat_id":   os.environ.get("TELEGRAM_CHAT_ID",  "####################"),
     "check_interval_minutes": 5,
     "display_timezone": "Africa/Cairo",
     "reminder_minutes_before": [15, 60],
