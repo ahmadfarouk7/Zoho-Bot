@@ -59,7 +59,7 @@ CONFIG = {
     "unseen_only": True,
     "first_run_lookback_days": 7,
     "history_keep_days": 30,
-    "past_lookback_days": 14,
+    "past_lookback_days": 2,
     "seen_ids_file":             os.path.join(DATA_DIR, "seen_email_ids.json"),
     "notified_meetings_file":    os.path.join(DATA_DIR, "notified_meetings.json"),
     "telegram_offset_file":      os.path.join(DATA_DIR, "telegram_offset.json"),
