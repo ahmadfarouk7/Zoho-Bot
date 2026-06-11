@@ -19,17 +19,36 @@ import requests
 import json
 import os
 import sys
+import threading
 from datetime import datetime, timezone, timedelta
 
 DATA_DIR = os.environ.get("BOT_DATA_DIR", "e:\\")
 os.makedirs(DATA_DIR, exist_ok=True)
-_CAIRO_TZ = timezone(timedelta(hours=2), "EET")
+def _last_weekday_of_month(year, month, weekday):
+    if month == 12:
+        last_day = 31
+    else:
+        last_day = (datetime(year, month + 1, 1) - timedelta(days=1)).day
+    d = datetime(year, month, last_day).date()
+    while d.weekday() != weekday:
+        d -= timedelta(days=1)
+    return d
+
+
+def egypt_utc_offset(when_utc=None):
+    """UTC+3 in summer (last Fri Apr – last Thu Oct), same as Mecca; UTC+2 in winter."""
+    when_utc = when_utc or datetime.now(timezone.utc)
+    ref = when_utc.astimezone(timezone(timedelta(hours=2)))
+    year = ref.year
+    dst_start = _last_weekday_of_month(year, 4, 4)
+    dst_end = _last_weekday_of_month(year, 10, 3)
+    return 3 if dst_start <= ref.date() <= dst_end else 2
 
 CONFIG = {
-    "zoho_email":    os.environ.get("ZOHO_EMAIL",    "####################"),
-    "zoho_password": os.environ.get("ZOHO_PASSWORD", "####################"),
-    "telegram_bot_token": os.environ.get("TELEGRAM_BOT_TOKEN", "####################"),
-    "telegram_chat_id":   os.environ.get("TELEGRAM_CHAT_ID",  "####################"),
+    "zoho_email":    os.environ.get("ZOHO_EMAIL",    "ahmed.farouk@beyond-solution.com"),
+    "zoho_password": os.environ.get("ZOHO_PASSWORD", "Qpr011Rtgx2Q"),
+    "telegram_bot_token": os.environ.get("TELEGRAM_BOT_TOKEN", "8840532206:AAFckFn4HkN4uq_vwcdEptDcHVPCDPrGQmE"),
+    "telegram_chat_id":   os.environ.get("TELEGRAM_CHAT_ID",   "7858493283"),
     "check_interval_minutes": 5,
     "display_timezone": "Africa/Cairo",
     "reminder_minutes_before": [15, 60],
@@ -48,7 +67,6 @@ CONFIG = {
     "meeting_history_file":      os.path.join(DATA_DIR, "meeting_history.json"),
     "log_file":                  os.path.join(DATA_DIR, "meeting_bot.log"),
 }
-
 ZOHO_IMAP_SERVER = "imappro.zoho.com"
 ZOHO_IMAP_PORT   = 993
 TELEGRAM_MAX_LEN = 4096
@@ -60,18 +78,31 @@ JOIN_LINK_RE = re.compile(
 )
 NOISE_LINE_RE = re.compile(
     r"(unsubscribe|view in browser|privacy policy|confidential|do not reply|"
-    r"sent from my |copyright|all rights reserved|microsoft teams meeting)",
+    r"sent from my |copyright|all rights reserved|microsoft teams meeting|"
+    r"welcome to zoho|access from anywhere|zoho mail|zohocalendar|"
+    r"this is an event reminder|you are receiving this)",
+    re.IGNORECASE,
+)
+SUMMARY_JUNK_RE = re.compile(
+    r"(\.zclet|^\s*\.[a-z_][\w-]*\s*[\{,]|color\s*:|font-size|margin:|padding:|"
+    r"^\s*[\{\}]|display\s*:|background|text-decoration|line-height|"
+    r"meet\.google\.com|teams\.microsoft\.com|zoom\.us|tinyurl\.com|"
+    r"https?://|noreply@|@zoho)",
     re.IGNORECASE,
 )
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.FileHandler(CONFIG["log_file"], encoding="utf-8"),
-        logging.StreamHandler(),
-    ],
-)
+def _cairo_time(*_args):
+    return now_cairo().timetuple()
+
+
+_log_fmt = logging.Formatter("%(asctime)s [%(levelname)s] %(message)s")
+_log_fmt.converter = _cairo_time
+logging.basicConfig(level=logging.INFO, handlers=[
+    logging.FileHandler(CONFIG["log_file"], encoding="utf-8"),
+    logging.StreamHandler(),
+])
+for _handler in logging.root.handlers:
+    _handler.setFormatter(_log_fmt)
 log = logging.getLogger(__name__)
 
 
@@ -139,14 +170,69 @@ def save_meeting_history(history):
         json.dump(history, f, indent=2, ensure_ascii=False)
 
 
+def clean_subject(subject):
+    return re.sub(r"\s+", " ", (subject or "").replace("\r\n", " ").replace("\r", " ")).strip()
+
+
 def normalize_meeting_title(subject):
-    title = subject.strip()
+    title = clean_subject(subject)
     for pattern in (
         r"^updated invitation:\s*", r"^invitation:\s*", r"^reminder:\s*",
         r"^accepted:\s*", r"^declined:\s*", r"^canceled:\s*", r"^cancelled:\s*", r"^re:\s*",
     ):
         title = re.sub(pattern, "", title, flags=re.IGNORECASE)
+    title = re.sub(r"\s*@\s*.+$", "", title, flags=re.IGNORECASE)
     return title.strip()
+
+
+def extract_time_from_subject(subject):
+    subject = clean_subject(subject)
+    match = re.search(
+        r"@\s*\w+\s+(\w+)\s+(\d{1,2}),?\s+(\d{4})\s+(\d{1,2}):(\d{2})\s*(am|pm)?",
+        subject, re.IGNORECASE,
+    )
+    if not match:
+        return None
+    month, day, year, hour, minute, ampm = match.groups()
+    time_part = f"{hour}:{minute}" + (f" {ampm}" if ampm else "")
+    date_str = f"{month} {day} {year} {time_part}"
+    for fmt in ("%b %d %Y %I:%M %p", "%B %d %Y %I:%M %p", "%b %d %Y %H:%M"):
+        try:
+            dt = datetime.strptime(date_str, fmt)
+            return dt.replace(tzinfo=local_tz()).astimezone(timezone.utc)
+        except ValueError:
+            continue
+    return None
+
+
+def canonical_meeting_start(record):
+    from_subject = extract_time_from_subject(record.get("subject", ""))
+    if from_subject:
+        return from_subject.replace(second=0, microsecond=0)
+    start = datetime.fromisoformat(record["start"]).replace(tzinfo=timezone.utc)
+    slot = 15 if record.get("end") else 30
+    return start.replace(minute=(start.minute // slot) * slot, second=0, microsecond=0)
+
+
+def record_quality_score(record):
+    score = len(record.get("summary") or []) + (2 if record.get("link") else 0)
+    if record.get("end"):
+        score += 5
+    if extract_join_link(record.get("location", "")):
+        score += 3
+    if extract_time_from_subject(record.get("subject", "")):
+        score += 4
+    return score
+
+
+def meeting_dedupe_key(record):
+    title = normalize_meeting_title(record.get("subject", "")).lower()
+    start = canonical_meeting_start(record)
+    return f"{title}|{start.astimezone(timezone.utc).isoformat()}"
+
+
+def lookback_days():
+    return CONFIG["past_lookback_days"]
 
 
 def meeting_id(subject, start_iso, ics_uid=""):
@@ -204,16 +290,10 @@ def add_to_history(record):
 def dedupe_meetings(records):
     best = {}
     for record in records:
-        mid = record["id"]
-        if mid not in best:
-            best[mid] = record
-            continue
-        cur = best[mid]
-        score = len(record.get("summary") or []) + (1 if record.get("link") else 0)
-        cur_score = len(cur.get("summary") or []) + (1 if cur.get("link") else 0)
-        if score >= cur_score:
-            best[mid] = record
-    return sorted(best.values(), key=lambda r: r["start"])
+        key = meeting_dedupe_key(record)
+        if key not in best or record_quality_score(record) > record_quality_score(best[key]):
+            best[key] = record
+    return sorted(best.values(), key=lambda r: canonical_meeting_start(r).isoformat())
 
 
 def upsert_meeting(record):
@@ -244,15 +324,18 @@ def prune_past_meetings():
     save_meetings(kept)
 
 
-def local_tz():
-    name = CONFIG.get("display_timezone", "Africa/Cairo")
-    if name in ("Africa/Cairo", "Egypt", "EET"):
-        return _CAIRO_TZ
-    try:
-        from zoneinfo import ZoneInfo
-        return ZoneInfo(name)
-    except Exception:
-        return _CAIRO_TZ
+def local_tz(at=None):
+    at = at or datetime.now(timezone.utc)
+    hours = egypt_utc_offset(at)
+    return timezone(timedelta(hours=hours), "EEST" if hours == 3 else "EET")
+
+
+def now_cairo():
+    return datetime.now(timezone.utc).astimezone(local_tz())
+
+
+def now_utc():
+    return datetime.now(timezone.utc)
 
 
 def decode_str(value):
@@ -341,16 +424,17 @@ def extract_join_link(text):
 def format_dt_local(dt):
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(local_tz()).strftime("%a %d %b · %H:%M")
+    return dt.astimezone(local_tz(dt)).strftime("%a %d %b · %H:%M")
 
 
 def format_dt_range(start, end=None):
+    tz = local_tz(start)
     line = format_dt_local(start)
     if end:
         if end.tzinfo is None:
             end = end.replace(tzinfo=timezone.utc)
-        line += f" – {end.astimezone(local_tz()).strftime('%H:%M')}"
-    return f"{line} ({start.astimezone(local_tz()).strftime('%Z')})"
+        line += f" – {end.astimezone(tz).strftime('%H:%M')}"
+    return f"{line} (Egypt time)"
 
 
 def human_time_until(target):
@@ -458,11 +542,24 @@ def extract_meeting_time_from_text(text):
     return None
 
 
+def is_summary_junk(line):
+    if not line or len(line.strip()) < 15:
+        return True
+    if SUMMARY_JUNK_RE.search(line) or NOISE_LINE_RE.search(line):
+        return True
+    if re.match(r"^[\s\.\{\},;:\-_|]+", line):
+        return True
+    alpha = sum(1 for c in line if c.isalpha())
+    if alpha < 8:
+        return True
+    return False
+
+
 def meaningful_lines(body):
     lines = []
     for raw in body.split("\n"):
         line = re.sub(r"\s+", " ", raw).strip()
-        if len(line) < 12 or NOISE_LINE_RE.search(line):
+        if len(line) < 15 or NOISE_LINE_RE.search(line) or is_summary_junk(line):
             continue
         if re.match(r"^[-_=]{5,}$", line):
             continue
@@ -477,12 +574,11 @@ def summarize_email_content(subject, body, ics_event=None):
             bullets.append(line[:160])
     for pattern in (
         r"(?:agenda|description|topic|purpose|objective|notes|about)[:\s]+(.+)",
-        r"(?:please join|join (?:us|the meeting)|meeting link)[:\s]+(.+)",
     ):
         match = re.search(pattern, body, re.IGNORECASE | re.DOTALL)
         if match:
             chunk = match.group(1).split("\n")[0].strip()
-            if len(chunk) > 20:
+            if len(chunk) > 20 and not is_summary_junk(chunk):
                 bullets.append(chunk[:160])
     if not bullets:
         for line in meaningful_lines(body):
@@ -490,14 +586,12 @@ def summarize_email_content(subject, body, ics_event=None):
                 bullets.append(line[:160])
             if len(bullets) >= 3:
                 break
-    if not bullets and body.strip():
-        bullets.append(re.sub(r"\s+", " ", body).strip()[:200])
     seen, unique = set(), []
     for b in bullets:
-        if b.lower() not in seen:
+        if b.lower() not in seen and not is_summary_junk(b):
             seen.add(b.lower())
             unique.append(b)
-    return unique[:4]
+    return unique[:3]
 
 
 def build_meeting_record(msg, subject, sender, body, email_date):
@@ -532,9 +626,20 @@ def build_meeting_record(msg, subject, sender, body, email_date):
     }
 
 
+PROMO_SUBJECT_RE = re.compile(
+    r"(welcome to zoho|access from anywhere|getting started|zoho mail tips|"
+    r"introducing zoho|try zoho|newsletter)",
+    re.IGNORECASE,
+)
+
+
 def is_meeting_email(subject, body, msg):
+    if PROMO_SUBJECT_RE.search(subject):
+        return False
+    if extract_ics_events(msg):
+        return True
     combined = (subject + " " + body).lower()
-    return any(kw.lower() in combined for kw in CONFIG["keywords"]) or bool(extract_ics_events(msg))
+    return any(kw.lower() in combined for kw in CONFIG["keywords"])
 
 
 def divider():
@@ -542,7 +647,7 @@ def divider():
 
 
 def format_meeting_card(record, mode="new"):
-    start = datetime.fromisoformat(record["start"]).replace(tzinfo=timezone.utc)
+    start = canonical_meeting_start(record)
     end = None
     if record.get("end"):
         end = datetime.fromisoformat(record["end"]).replace(tzinfo=timezone.utc)
@@ -575,15 +680,17 @@ def format_reminder_card(record, minutes_before):
 
 
 def format_week_header(week_start, week_end, past_count, upcoming_count):
+    ws = week_start.astimezone(local_tz(week_start))
+    we = week_end.astimezone(local_tz(week_end))
     return (
         f"📊 <b>This Week's Meetings</b>\n{divider()}\n"
-        f"📆 {week_start.strftime('%b %d')} – {week_end.strftime('%b %d, %Y')}\n"
+        f"📆 {ws.strftime('%b %d')} – {we.strftime('%b %d, %Y')} (Egypt time)\n"
         f"✅ Past: <b>{past_count}</b>   ·   📅 Upcoming: <b>{upcoming_count}</b>"
     )
 
 
 def format_week_compact(record, is_past):
-    start = datetime.fromisoformat(record["start"]).replace(tzinfo=timezone.utc)
+    start = canonical_meeting_start(record)
     icon = "✅" if is_past else "📅"
     line = f"{icon} <b>{format_dt_local(start)}</b> — {clean_text(record['subject'])}"
     if record.get("link") and not is_past:
@@ -664,9 +771,12 @@ def parse_email_message(raw):
 
 
 def get_week_range():
-    today = datetime.now(timezone.utc)
-    start = today - timedelta(days=today.weekday())
-    return start.replace(hour=0, minute=0, second=0, microsecond=0), start + timedelta(days=6, hours=23, minutes=59, seconds=59)
+    today = now_cairo()
+    start = (today - timedelta(days=today.weekday())).replace(
+        hour=0, minute=0, second=0, microsecond=0,
+    )
+    end = start + timedelta(days=6, hours=23, minutes=59, seconds=59)
+    return start.astimezone(timezone.utc), end.astimezone(timezone.utc)
 
 
 def register_meeting_if_upcoming(record):
@@ -678,6 +788,10 @@ def register_meeting_if_upcoming(record):
 def process_meeting_record(record, notify=False):
     add_to_history(record)
     register_meeting_if_upcoming(record)
+    start = datetime.fromisoformat(record["start"]).replace(tzinfo=timezone.utc)
+    if start <= now_utc():
+        mark_meeting_notified(record["id"])
+        return False
     if not notify:
         return False
     notified = load_notified_meetings()
@@ -739,37 +853,79 @@ def check_reminders():
 def ensure_telegram_polling():
     url = f"https://api.telegram.org/bot{CONFIG['telegram_bot_token']}/deleteWebhook"
     try:
-        requests.get(url, params={"drop_pending_updates": False}, timeout=10).raise_for_status()
+        requests.get(url, params={"drop_pending_updates": True}, timeout=10).raise_for_status()
         log.info("Telegram webhook cleared.")
     except Exception as e:
         log.warning("Could not clear webhook: %s", e)
 
 
-def handle_telegram_command(command):
-    if command == "/week":
-        send_telegram("⏳ <b>Fetching this week's meetings...</b>")
-        get_this_week_meetings()
-    elif command == "/today":
-        send_telegram("⏳ <b>Fetching today's meetings...</b>")
-        get_today_meetings()
-    elif command == "/past":
+def drain_pending_telegram_updates():
+    offset = load_telegram_offset()
+    url = f"https://api.telegram.org/bot{CONFIG['telegram_bot_token']}/getUpdates"
+    try:
+        while True:
+            r = requests.get(url, params={"offset": offset, "timeout": 0}, timeout=5)
+            r.raise_for_status()
+            updates = r.json().get("result", [])
+            if not updates:
+                break
+            offset = updates[-1]["update_id"] + 1
+        if offset > load_telegram_offset():
+            save_telegram_offset(offset)
+            log.info("Drained pending Telegram updates.")
+    except Exception as e:
+        log.warning("Could not drain pending updates: %s", e)
+
+
+def run_background_tasks():
+    try:
+        refresh_upcoming_meetings()
+        check_email()
+        check_reminders()
+    except Exception as e:
+        log.error("Background tasks failed: %s", e, exc_info=True)
+
+
+MENU_CHOICES = {
+    "1": "past", "/past": "past", "past": "past",
+    "2": "today", "/today": "today", "today": "today",
+    "3": "upcoming", "/upcoming": "upcoming", "upcoming": "upcoming",
+    "/start": "menu", "/help": "menu", "/menu": "menu", "menu": "menu",
+}
+
+
+def send_menu_message():
+    now = now_cairo()
+    send_telegram(
+        f"👋 <b>Welcome to your Meeting Bot</b>\n{divider()}\n"
+        f"🕐 {now.strftime('%A %d %b %Y · %H:%M')} (Egypt time)\n\n"
+        f"<b>Choose an option:</b>\n"
+        f"1️⃣ Past meetings (last {lookback_days()} days)\n"
+        f"2️⃣ Today's meetings\n"
+        f"3️⃣ Upcoming meetings (next {lookback_days()} days)\n\n"
+        f"Reply with <b>1</b>, <b>2</b>, or <b>3</b>"
+    )
+
+
+def handle_user_choice(choice):
+    action = MENU_CHOICES.get(choice)
+    if not action:
+        send_telegram("❓ Please reply with <b>1</b>, <b>2</b>, or <b>3</b>.")
+        send_menu_message()
+        return
+    if action == "menu":
+        send_menu_message()
+        return
+    if action == "past":
         send_telegram("⏳ <b>Loading past meetings...</b>")
         get_past_meetings()
-    elif command == "/status":
-        upcoming = sum(1 for m in load_meetings()
-                       if datetime.fromisoformat(m["start"]).replace(tzinfo=timezone.utc) > datetime.now(timezone.utc))
-        send_telegram(
-            f"⚙️ <b>Bot Status</b>\n{divider()}\n"
-            f"📁 Data: <code>{DATA_DIR}</code>\n"
-            f"🔔 Reminders: <b>{', '.join(str(m) for m in CONFIG['reminder_minutes_before'])}</b> min\n"
-            f"📅 Upcoming tracked: <b>{upcoming}</b>\n"
-            f"📚 History: <b>{len(load_meeting_history())}</b> meetings"
-        )
-    elif command in ("/help", "/start"):
-        send_telegram(
-            f"🤖 <b>Commands</b>\n{divider()}\n"
-            "/week — this week\n/today — today only\n/past — last 14 days\n/status — bot info\n/help"
-        )
+    elif action == "today":
+        send_telegram("⏳ <b>Loading today's meetings...</b>")
+        get_today_meetings()
+    elif action == "upcoming":
+        send_telegram("⏳ <b>Loading upcoming meetings...</b>")
+        get_upcoming_meetings()
+    send_menu_message()
 
 
 def poll_telegram_commands():
@@ -788,15 +944,18 @@ def poll_telegram_commands():
         if str((message.get("chat") or {}).get("id", "")) != str(CONFIG["telegram_chat_id"]):
             continue
         text = (message.get("text") or "").strip()
-        if not text.startswith("/"):
+        if not text:
             continue
-        command = text.split()[0].lower().split("@")[0]
-        log.info("Command: %s", command)
+        choice = text.split()[0].lower().split("@")[0]
+        if choice not in MENU_CHOICES:
+            continue
+        log.info("User choice: %s", choice)
         try:
-            handle_telegram_command(command)
+            handle_user_choice(choice)
         except Exception as e:
-            log.error("Command %s failed: %s", command, e, exc_info=True)
-            send_telegram(f"❌ <b>Error running {command}</b>\n{clean_text(str(e))}")
+            log.error("Choice %s failed: %s", choice, e, exc_info=True)
+            send_telegram(f"❌ <b>Error</b>\n{clean_text(str(e))}")
+            send_menu_message()
     if offset > load_telegram_offset():
         save_telegram_offset(offset)
 
@@ -807,16 +966,20 @@ def get_today_meetings():
     day_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
     day_end = (now_local.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1) - timedelta(seconds=1)).astimezone(timezone.utc)
     try:
-        records = scan_meetings_since(day_start - timedelta(days=14), until=day_end)
-        today = [r for r in records if day_start <= datetime.fromisoformat(r["start"]).replace(tzinfo=timezone.utc) <= day_end]
+        records = scan_meetings_since(day_start - timedelta(days=lookback_days()), until=day_end)
+        today = dedupe_meetings([
+            r for r in records
+            if day_start <= canonical_meeting_start(r) <= day_end
+        ])
         if not today:
             send_telegram(f"📭 No meetings for <b>{now_local.strftime('%A %d %b')}</b>.")
             return
         send_telegram(f"📅 <b>Today — {now_local.strftime('%A %d %b')}</b>\n{divider()}\n<b>{len(today)}</b> meeting(s)")
-        now = datetime.now(timezone.utc)
+        now = now_utc()
         for record in today:
-            start = datetime.fromisoformat(record["start"]).replace(tzinfo=timezone.utc)
-            send_telegram(format_meeting_card(record, mode="past" if start < now else "upcoming"))
+            send_telegram(format_meeting_card(
+                record, mode="past" if canonical_meeting_start(record) < now else "upcoming",
+            ))
             time.sleep(0.4)
     except Exception as e:
         log.error("get_today_meetings: %s", e, exc_info=True)
@@ -824,20 +987,28 @@ def get_today_meetings():
 
 
 def get_past_meetings():
-    now = datetime.now(timezone.utc)
-    since = now - timedelta(days=CONFIG["past_lookback_days"])
+    now = now_utc()
+    tz = local_tz()
+    now_local = now.astimezone(tz)
+    day_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
+    since = now - timedelta(days=lookback_days())
     try:
-        records = scan_meetings_since(since, until=now)
-        past = [r for r in records if datetime.fromisoformat(r["start"]).replace(tzinfo=timezone.utc) < now]
+        records = scan_meetings_since(since, until=day_start - timedelta(seconds=1))
+        past = dedupe_meetings([
+            r for r in records
+            if since <= canonical_meeting_start(r) < day_start
+        ])
         if not past:
-            history_past = [h for h in load_meeting_history()
-                            if datetime.fromisoformat(h["start"]).replace(tzinfo=timezone.utc) < now]
+            history_past = [
+                h for h in load_meeting_history()
+                if since <= canonical_meeting_start(h) < day_start
+            ]
             past = dedupe_meetings(history_past)
         if not past:
-            send_telegram(f"📭 No past meetings in the last <b>{CONFIG['past_lookback_days']}</b> days.")
+            send_telegram(f"📭 No past meetings in the last <b>{lookback_days()}</b> days.")
             return
         send_telegram(
-            f"✅ <b>Past Meetings</b> (last {CONFIG['past_lookback_days']} days)\n"
+            f"✅ <b>Past Meetings</b> (last {lookback_days()} days)\n"
             f"{divider()}\n<b>{len(past)}</b> meeting(s)"
         )
         for record in past:
@@ -845,6 +1016,36 @@ def get_past_meetings():
             time.sleep(0.4)
     except Exception as e:
         log.error("get_past_meetings: %s", e, exc_info=True)
+        send_telegram(f"❌ <b>Error</b>\n{clean_text(str(e))}")
+
+
+def get_upcoming_meetings():
+    now = now_utc()
+    until = now + timedelta(days=lookback_days())
+    try:
+        records = scan_meetings_since(now - timedelta(days=1), until=until)
+        upcoming = dedupe_meetings([
+            r for r in records
+            if now < canonical_meeting_start(r) <= until
+        ])
+        tracked = [
+            m for m in load_meetings()
+            if now < canonical_meeting_start(m) <= until
+        ]
+        upcoming = dedupe_meetings(upcoming + tracked)
+        if not upcoming:
+            send_telegram(f"📭 No upcoming meetings in the next <b>{lookback_days()}</b> days.")
+            return
+        send_telegram(
+            f"📅 <b>Upcoming Meetings</b> (next {lookback_days()} days)\n"
+            f"{divider()}\n<b>{len(upcoming)}</b> meeting(s)"
+        )
+        for record in upcoming:
+            register_meeting_if_upcoming(record)
+            send_telegram(format_meeting_card(record, mode="upcoming"))
+            time.sleep(0.4)
+    except Exception as e:
+        log.error("get_upcoming_meetings: %s", e, exc_info=True)
         send_telegram(f"❌ <b>Error</b>\n{clean_text(str(e))}")
 
 
@@ -905,7 +1106,7 @@ def check_email():
             msg, subject, sender, body, email_date, record = parse_email_message(raw)
             if is_meeting_email(subject, body, msg):
                 log.info("Meeting email: %s", subject)
-                if process_meeting_record(record, notify=True):
+                if process_meeting_record(record, notify=not first_run):
                     new_count += 1
         save_json_set(CONFIG["seen_ids_file"], seen_ids)
         mail.logout()
@@ -925,26 +1126,15 @@ def refresh_upcoming_meetings():
 
 if __name__ == "__main__":
     migrate_legacy_data()
-    if len(sys.argv) > 1 and sys.argv[1] == "week":
-        get_this_week_meetings()
-    else:
-        log.info("Bot started. Data dir: %s", DATA_DIR)
-        send_telegram(
-            f"🤖 <b>Meeting Bot running</b>\n{divider()}\n"
-            f"📁 <code>{DATA_DIR}</code>\n"
-            f"🔔 Reminders: <b>{', '.join(str(m) for m in CONFIG['reminder_minutes_before'])}</b> min before\n\n"
-            "/week · /today · /past · /status · /help"
-        )
-        ensure_telegram_polling()
-        refresh_upcoming_meetings()
-        check_email()
-        check_reminders()
+    log.info("Bot started. Data dir: %s (Egypt time)", DATA_DIR)
+    ensure_telegram_polling()
+    drain_pending_telegram_updates()
+    send_menu_message()
+    threading.Thread(target=run_background_tasks, daemon=True).start()
+    schedule.every(CONFIG["check_interval_minutes"]).minutes.do(check_email)
+    schedule.every(CONFIG["check_interval_minutes"]).minutes.do(check_reminders)
+    schedule.every(6).hours.do(refresh_upcoming_meetings)
+    while True:
+        schedule.run_pending()
         poll_telegram_commands()
-        schedule.every(CONFIG["check_interval_minutes"]).minutes.do(check_email)
-        schedule.every(CONFIG["check_interval_minutes"]).minutes.do(check_reminders)
-        schedule.every(6).hours.do(refresh_upcoming_meetings)
-        schedule.every().monday.at("08:00").do(get_this_week_meetings)
-        while True:
-            schedule.run_pending()
-            poll_telegram_commands()
-            time.sleep(12)
+        time.sleep(12)
